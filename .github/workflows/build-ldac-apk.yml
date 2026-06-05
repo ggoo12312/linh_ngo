@@ -1,0 +1,78 @@
+name: Build LDAC Meter APK
+
+on:
+  push:
+    branches:
+      - claude/ldac-bitrate-meter-Ft81O
+    paths:
+      - 'ldac-meter/**'
+      - '.github/workflows/build-ldac-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses 2>/dev/null || true
+
+      - name: Install required SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Build Debug APK
+        run: |
+          cd ldac-meter
+          gradle assembleDebug --no-daemon -g ~/.gradle
+
+      - name: Build Release APK (signed with debug key)
+        run: |
+          cd ldac-meter
+          gradle assembleRelease --no-daemon -g ~/.gradle
+
+      - name: List built APKs
+        run: find ldac-meter -name "*.apk" -type f
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LDACMeter-debug
+          path: ldac-meter/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LDACMeter-release
+          path: ldac-meter/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## APK Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "APK files built successfully:" >> $GITHUB_STEP_SUMMARY
+          find ldac-meter -name "*.apk" | while read f; do
+            size=$(du -h "$f" | cut -f1)
+            echo "- \`$f\` ($size)" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download APK từ tab **Artifacts** phía trên." >> $GITHUB_STEP_SUMMARY
