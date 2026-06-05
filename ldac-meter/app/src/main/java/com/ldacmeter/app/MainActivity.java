@@ -281,26 +281,33 @@ public class MainActivity extends AppCompatActivity {
             status = cachedStatus;
         }
 
-        if (status == null) {
-            // Show actionable instructions — user must reconnect earbuds to trigger broadcast
-            tvCodec.setText("Cần kết nối lại");
-            tvBitrate.setText("—");
-            tvMode.setText("—");
-            progressBitrate.setProgress(0);
-            tvVerdict.setText(
-                "Android " + Build.VERSION.SDK_INT + " chặn API đọc codec trực tiếp.\n\n" +
-                "Nhấn nút KÍCH HOẠT bên dưới,\nrồi ngắt kết nối tai nghe ra khỏi Bluetooth\nvà kết nối lại.\n\n" +
-                "App sẽ tự bắt dữ liệu codec khi kết nối.");
-            tvVerdict.setTextColor(Color.parseColor("#FF6600"));
-            btnReconnect.setVisibility(android.view.View.VISIBLE);
-            tryDumpsysAsync();
+        if (status != null) {
+            btnReconnect.setVisibility(android.view.View.GONE);
+            BluetoothCodecConfig cfg = status.getCodecConfig();
+            if (cfg == null) { addLog("cfg = null"); return; }
+            displayCodecInfo(cfg);
             return;
         }
 
-        btnReconnect.setVisibility(android.view.View.GONE);
-        BluetoothCodecConfig cfg = status.getCodecConfig();
-        if (cfg == null) { addLog("cfg = null"); return; }
-        displayCodecInfo(cfg);
+        // Strategy 3: Settings.Global — stores the codec preference set in Developer Options.
+        // Always readable, no special permissions needed.
+        if (tryDisplayFromSettings()) return;
+
+        // Strategy 4: async dumpsys — will update UI when result arrives
+        tryDumpsysAsync();
+
+        // All live strategies failed — prompt reconnect to trigger a fresh broadcast
+        tvCodec.setText("Đang đọc...");
+        tvBitrate.setText("—");
+        tvMode.setText("—");
+        progressBitrate.setProgress(0);
+        tvVerdict.setText(
+            "Android " + Build.VERSION.SDK_INT + " không cho đọc codec trực tiếp.\n\n" +
+            "Cách 1: Nhấn KÍCH HOẠT → ngắt kết nối tai nghe → kết nối lại\n" +
+            "Cách 2: Vào Settings → Developer options → chọn LDAC tại \"Bluetooth audio codec\"\n" +
+            "        và \"LDAC quality\" (để app đọc cài đặt)");
+        tvVerdict.setTextColor(Color.parseColor("#FF6600"));
+        btnReconnect.setVisibility(android.view.View.VISIBLE);
     }
 
     // ── Codec reading ───────────────────────────────────────────────────────
@@ -318,12 +325,74 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** Read codec pref from Android Settings (quick, no IPC needed). */
-    private void tryReadSettingsCodec() {
+    /**
+     * Strategy 3: read LDAC codec preference from Settings.Global.
+     * These keys are written by Developer Options when the user selects a codec/quality,
+     * and are always readable by third-party apps without any special permission.
+     * Note: shows the configured preference, not the dynamically negotiated bitrate.
+     */
+    private boolean tryDisplayFromSettings() {
         try {
-            // Samsung OneUI stores some BT prefs here
-            String v = Settings.Global.getString(getContentResolver(),
-                    "bluetooth_a2dp_codec_type");
+            android.content.ContentResolver cr = getContentResolver();
+
+            // Key written by AOSP/Samsung Dev Options when user picks LDAC quality
+            String ldacQualStr  = Settings.Global.getString(cr, "bluetooth_a2dp_codec_ldac_playback_quality");
+            String codecTypeStr = Settings.Global.getString(cr, "bluetooth_a2dp_codec_type");
+            String srStr2       = Settings.Global.getString(cr, "bluetooth_a2dp_codec_sample_rate");
+            String bitsStr2     = Settings.Global.getString(cr, "bluetooth_a2dp_codec_bits_per_sample");
+            addLog("Prefs codec=" + codecTypeStr + " ldacQ=" + ldacQualStr
+                    + " sr=" + srStr2 + " bits=" + bitsStr2);
+
+            if (ldacQualStr != null) {
+                long s1 = Long.parseLong(ldacQualStr.trim());
+                tvCodec.setText("LDAC †");
+                showLdac(s1);
+                // Append transparency note
+                CharSequence existing = tvVerdict.getText();
+                tvVerdict.setText(existing
+                    + "\n\n† Cài đặt Developer Options (không phải đo trực tiếp).\n"
+                    + "Trên Android 16 không thể đọc bitrate thực — giá trị trên là bạn đã chọn.");
+                btnReconnect.setVisibility(android.view.View.GONE);
+                return true;
+            }
+
+            // Fallback: at least show the selected codec type
+            if (codecTypeStr != null) {
+                try {
+                    int ct = Integer.parseInt(codecTypeStr.trim());
+                    if (ct == BluetoothCodecConfig.SOURCE_CODEC_TYPE_LDAC) {
+                        tvCodec.setText("LDAC †");
+                        tvBitrate.setText("—");
+                        tvMode.setText("Chưa cài chất lượng");
+                        tvVerdict.setText(
+                            "LDAC đang được dùng (từ cài đặt).\n\n" +
+                            "Vào Developer Options → \"LDAC quality\" → chọn\n" +
+                            "\"Optimize for audio quality\" để xem 990 kbps.");
+                        tvVerdict.setTextColor(Color.parseColor("#2979FF"));
+                        btnReconnect.setVisibility(android.view.View.GONE);
+                        return true;
+                    }
+                    if (ct > 0) {
+                        tvCodec.setText(codecName(ct) + " †");
+                        tvVerdict.setText("Đang dùng " + codecName(ct)
+                            + " (từ cài đặt).\nChuyển sang LDAC trong Developer Options.");
+                        tvVerdict.setTextColor(Color.parseColor("#FF6600"));
+                        return true;
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+
+            return false;
+        } catch (Exception e) {
+            addLog("Settings fallback: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private void tryReadSettingsCodec() {
+        // Initial probe — results logged and used by tryDisplayFromSettings()
+        try {
+            String v = Settings.Global.getString(getContentResolver(), "bluetooth_a2dp_codec_type");
             if (v != null) addLog("Settings codec_type = " + v);
         } catch (Exception ignored) {}
     }
@@ -335,23 +404,55 @@ public class MainActivity extends AppCompatActivity {
                         new String[]{"dumpsys", "bluetooth_manager"});
                 BufferedReader br = new BufferedReader(
                         new InputStreamReader(p.getInputStream()));
-                StringBuilder sb = new StringBuilder();
+                StringBuilder collected = new StringBuilder();
                 String line; int n = 0;
-                while ((line = br.readLine()) != null && n++ < 3000) {
+                // Look for mA2dpCodecConfig / CodecSpecific1 sections
+                while ((line = br.readLine()) != null && n++ < 4000) {
                     String lo = line.toLowerCase();
                     if (lo.contains("ldac") || lo.contains("codec") ||
                         lo.contains("bitrate") || lo.contains("sbc") ||
-                        lo.contains("aptx")   || lo.contains("aac")) {
-                        sb.append(line.trim()).append("\n");
+                        lo.contains("aptx")   || lo.contains("aac") ||
+                        lo.contains("codecspecific") || lo.contains("specific1")) {
+                        collected.append(line.trim()).append("\n");
                     }
                 }
                 p.destroy();
-                if (sb.length() > 0) addLog("dumpsys:\n" + sb.toString().trim());
-                else                  addLog("dumpsys: no codec lines");
+                if (collected.length() == 0) {
+                    addLog("dumpsys: no codec lines");
+                    return;
+                }
+                String dump = collected.toString().trim();
+                addLog("dumpsys:\n" + dump);
+                // Try to extract CodecSpecific1 for LDAC mode
+                parseDumpsysAndUpdateUI(dump);
             } catch (Exception e) {
                 addLog("dumpsys: " + e.getMessage());
             }
         }).start();
+    }
+
+    private void parseDumpsysAndUpdateUI(String dump) {
+        try {
+            // Look for patterns like: CodecSpecific1: 1000  or  mCodecSpecific1=1000
+            java.util.regex.Pattern pat = java.util.regex.Pattern.compile(
+                    "(?i)(?:CodecSpecific1|mCodecSpecific1)[=:\\s]+(\\d+)");
+            java.util.regex.Matcher m = pat.matcher(dump);
+            boolean isLdacDump = dump.toLowerCase().contains("ldac");
+            if (m.find() && isLdacDump) {
+                long s1 = Long.parseLong(m.group(1));
+                addLog("dumpsys LDAC s1=" + s1);
+                runOnUiThread(() -> {
+                    if (cachedStatus != null) return; // broadcast already gave us data
+                    tvCodec.setText("LDAC ‡");
+                    showLdac(s1);
+                    CharSequence existing = tvVerdict.getText();
+                    tvVerdict.setText(existing + "\n\n‡ Nguồn: dumpsys bluetooth_manager");
+                    btnReconnect.setVisibility(android.view.View.GONE);
+                });
+            }
+        } catch (Exception e) {
+            addLog("dumpsys parse: " + e.getMessage());
+        }
     }
 
     // ── Display ─────────────────────────────────────────────────────────────
