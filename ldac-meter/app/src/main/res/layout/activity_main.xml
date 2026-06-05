@@ -320,7 +320,19 @@
             android:textColor="#000000"
             android:textStyle="bold"
             android:backgroundTint="#00E5FF"
-            android:layout_marginBottom="12dp" />
+            android:layout_marginBottom="8dp" />
+
+        <!-- Reconnect Button — shown when API is blocked, hidden otherwise -->
+        <Button
+            android:id="@+id/btn_reconnect"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:text="KÍCH HOẠT BẮT TÍN HIỆU"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            android:backgroundTint="#2979FF"
+            android:layout_marginBottom="12dp"
+            android:visibility="gone" />
 
         <!-- Debug Log Card -->
         <androidx.cardview.widget.CardView
