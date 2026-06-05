@@ -66,47 +66,13 @@ jobs:
           path: ldac-meter/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ldac-meter-v1.0.${{ github.run_number }}
-          name: "LDAC Bitrate Meter v1.0 (build ${{ github.run_number }})"
-          body: |
-            ## LDAC Bitrate Meter APK
-
-            App Android đo tốc độ truyền LDAC thực tế của tai nghe Bluetooth.
-
-            ### Tính năng:
-            - Hiển thị codec đang dùng (LDAC / SBC / AAC / aptX / aptX HD)
-            - Đo bitrate LDAC thực tế: 330 / 660 / **990 kbps**
-            - Phát hiện chế độ Adaptive (tự động điều chỉnh)
-            - Cập nhật tự động mỗi 2 giây + nút "Đo lại ngay"
-            - Debug log chi tiết
-
-            ### Cách cài đặt:
-            1. Tải file `LDACMeter-release.zip` (bên dưới)
-            2. Giải nén lấy file `.apk`
-            3. Trên điện thoại: **Settings → Security → Install unknown apps** → bật
-            4. Mở file APK để cài
-            5. Cấp quyền Bluetooth khi app yêu cầu
-
-            ### Cách dùng:
-            1. Kết nối tai nghe LDAC qua Bluetooth
-            2. Mở app nhạc, bắt đầu phát nhạc
-            3. Mở **LDAC Meter**
-            4. Xem bitrate thực tế — nếu hiện **990 kbps** là đạt chuẩn LDAC!
-
-            ### Nếu không thấy 990 kbps:
-            - Android: **Settings → Developer options → Bluetooth audio codec → LDAC**
-            - Chọn LDAC Quality: **"Optimize for audio quality"**
-
-            ### Yêu cầu:
-            - Android 8.0+ (API 26+)
-            - Bluetooth hỗ trợ LDAC (hầu hết Android 8+ và tai nghe Sony/tương thích)
-          files: |
-            ldac-meter/app/build/outputs/apk/debug/app-debug.apk
-            ldac-meter/app/build/outputs/apk/release/app-release.apk
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Summary
+        run: |
+          echo "## APK Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "APK files built successfully:" >> $GITHUB_STEP_SUMMARY
+          find ldac-meter -name "*.apk" | while read f; do
+            size=$(du -h "$f" | cut -f1)
+            echo "- \`$f\` ($size)" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download APK từ tab **Artifacts** phía trên." >> $GITHUB_STEP_SUMMARY
