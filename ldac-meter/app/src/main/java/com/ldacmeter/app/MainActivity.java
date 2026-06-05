@@ -25,73 +25,70 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
 import java.lang.reflect.Method;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int PERMISSION_REQUEST_CODE = 100;
-    private static final int REFRESH_INTERVAL_MS = 2000;
+    private static final int PERM_CODE = 100;
+    private static final int REFRESH_MS = 2000;
 
-    // Hidden API constants — must use string literals since they're @hide
-    private static final String ACTION_CODEC_CONFIG_CHANGED =
+    // Hidden API string constants (cannot reference BluetoothA2dp.ACTION_* directly)
+    private static final String ACTION_CODEC_CHANGED =
             "android.bluetooth.a2dp.profile.action.CODEC_CONFIG_CHANGED";
-    private static final String ACTION_CONNECTION_STATE_CHANGED =
+    private static final String ACTION_CONN_CHANGED =
             "android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED";
 
-    private BluetoothAdapter bluetoothAdapter;
-    private BluetoothA2dp bluetoothA2dp;
-    private Handler handler = new Handler(Looper.getMainLooper());
+    private BluetoothAdapter btAdapter;
+    private BluetoothA2dp btA2dp;
+    private final Handler handler = new Handler(Looper.getMainLooper());
 
-    private TextView tvStatus, tvDeviceName, tvCodec, tvBitrate;
-    private TextView tvSampleRate, tvBitDepth, tvChannelMode, tvQualityMode;
-    private TextView tvVerdict, tvLog;
+    private TextView tvStatus, tvDevice, tvCodec, tvBitrate;
+    private TextView tvSampleRate, tvBitDepth, tvChannel, tvMode, tvVerdict, tvLog;
     private ProgressBar progressBitrate;
     private Button btnRefresh;
-    private View cardLdac;
+    private View cardInfo;
+    private final StringBuilder logBuf = new StringBuilder();
 
-    private StringBuilder logBuilder = new StringBuilder();
-
-    private BroadcastReceiver codecReceiver = new BroadcastReceiver() {
+    private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
-        public void onReceive(Context context, Intent intent) {
+        public void onReceive(Context ctx, Intent intent) {
             String action = intent.getAction();
-            if (ACTION_CODEC_CONFIG_CHANGED.equals(action)) {
-                addLog("Codec config changed");
+            if (ACTION_CODEC_CHANGED.equals(action)) {
+                addLog("Codec config changed event");
                 refreshCodecInfo();
-            } else if (ACTION_CONNECTION_STATE_CHANGED.equals(action)) {
+            } else if (ACTION_CONN_CHANGED.equals(action)) {
                 int state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1);
-                addLog("A2DP state: " + stateToString(state));
+                addLog("A2DP state → " + stateStr(state));
                 refreshCodecInfo();
             }
         }
     };
 
-    private BluetoothProfile.ServiceListener profileListener = new BluetoothProfile.ServiceListener() {
+    private final BluetoothProfile.ServiceListener profileListener = new BluetoothProfile.ServiceListener() {
         @Override
         public void onServiceConnected(int profile, BluetoothProfile proxy) {
             if (profile == BluetoothProfile.A2DP) {
-                bluetoothA2dp = (BluetoothA2dp) proxy;
-                addLog("A2DP profile connected");
+                btA2dp = (BluetoothA2dp) proxy;
+                addLog("A2DP service connected");
                 refreshCodecInfo();
             }
         }
-
         @Override
         public void onServiceDisconnected(int profile) {
             if (profile == BluetoothProfile.A2DP) {
-                bluetoothA2dp = null;
-                addLog("A2DP profile disconnected");
+                btA2dp = null;
+                addLog("A2DP service disconnected");
             }
         }
     };
 
-    private Runnable periodicRefresh = new Runnable() {
-        @Override
-        public void run() {
+    private final Runnable periodicRefresh = new Runnable() {
+        @Override public void run() {
             refreshCodecInfo();
-            handler.postDelayed(this, REFRESH_INTERVAL_MS);
+            handler.postDelayed(this, REFRESH_MS);
         }
     };
 
@@ -100,252 +97,249 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        tvStatus       = findViewById(R.id.tv_status);
-        tvDeviceName   = findViewById(R.id.tv_device_name);
-        tvCodec        = findViewById(R.id.tv_codec);
-        tvBitrate      = findViewById(R.id.tv_bitrate);
-        tvSampleRate   = findViewById(R.id.tv_sample_rate);
-        tvBitDepth     = findViewById(R.id.tv_bit_depth);
-        tvChannelMode  = findViewById(R.id.tv_channel_mode);
-        tvQualityMode  = findViewById(R.id.tv_quality_mode);
-        tvVerdict      = findViewById(R.id.tv_verdict);
-        tvLog          = findViewById(R.id.tv_log);
+        tvStatus     = findViewById(R.id.tv_status);
+        tvDevice     = findViewById(R.id.tv_device_name);
+        tvCodec      = findViewById(R.id.tv_codec);
+        tvBitrate    = findViewById(R.id.tv_bitrate);
+        tvSampleRate = findViewById(R.id.tv_sample_rate);
+        tvBitDepth   = findViewById(R.id.tv_bit_depth);
+        tvChannel    = findViewById(R.id.tv_channel_mode);
+        tvMode       = findViewById(R.id.tv_quality_mode);
+        tvVerdict    = findViewById(R.id.tv_verdict);
+        tvLog        = findViewById(R.id.tv_log);
         progressBitrate = findViewById(R.id.progress_bitrate);
-        btnRefresh     = findViewById(R.id.btn_refresh);
-        cardLdac       = findViewById(R.id.card_ldac);
+        btnRefresh   = findViewById(R.id.btn_refresh);
+        cardInfo     = findViewById(R.id.card_ldac);
 
-        btnRefresh.setOnClickListener(v -> {
-            addLog("Manual refresh");
-            refreshCodecInfo();
-        });
+        btnRefresh.setOnClickListener(v -> { addLog("Manual refresh"); refreshCodecInfo(); });
 
-        bypassHiddenApiRestrictions();
-        checkPermissionsAndInit();
+        unlockHiddenApis();
+        checkPermsAndInit();
     }
 
-    /**
-     * Bypass Android 9+ hidden API restrictions so reflection can access
-     * BluetoothA2dp.getCodecStatus() and related @hide methods.
-     */
-    private void bypassHiddenApiRestrictions() {
+    /** Use LSPosed HiddenApiBypass — more reliable than VMRuntime trick on Android 12+ / EMUI */
+    private void unlockHiddenApis() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return;
         try {
-            Class<?> vmRuntime = Class.forName("dalvik.system.VMRuntime");
-            Method getRuntime = vmRuntime.getDeclaredMethod("getRuntime");
-            getRuntime.setAccessible(true);
-            Object runtime = getRuntime.invoke(null);
-            Method setExemptions = vmRuntime.getDeclaredMethod(
-                    "setHiddenApiExemptions", String[].class);
-            setExemptions.setAccessible(true);
-            setExemptions.invoke(runtime, new Object[]{new String[]{"L"}});
-            addLog("Hidden API bypass OK");
-        } catch (Exception e) {
-            addLog("Hidden API bypass failed: " + e.getClass().getSimpleName());
+            HiddenApiBypass.addHiddenApiExemptions("L");
+            addLog("HiddenApiBypass: OK (all exempt)");
+        } catch (Throwable t) {
+            addLog("HiddenApiBypass failed: " + t.getClass().getSimpleName());
+            // Fallback: legacy VMRuntime trick
+            try {
+                Class<?> vm = Class.forName("dalvik.system.VMRuntime");
+                Method getRT = vm.getDeclaredMethod("getRuntime");
+                getRT.setAccessible(true);
+                Object runtime = getRT.invoke(null);
+                Method setEx = vm.getDeclaredMethod("setHiddenApiExemptions", String[].class);
+                setEx.setAccessible(true);
+                setEx.invoke(runtime, new Object[]{new String[]{"L"}});
+                addLog("VMRuntime bypass: OK");
+            } catch (Exception e2) {
+                addLog("VMRuntime bypass failed: " + e2.getClass().getSimpleName());
+            }
         }
     }
 
-    private void checkPermissionsAndInit() {
+    private void checkPermsAndInit() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            String[] perms = {
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_SCAN
-            };
+            String[] perms = {Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN};
             boolean need = false;
-            for (String p : perms) {
-                if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+            for (String p : perms)
+                if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED)
                     need = true;
-                    break;
-                }
-            }
-            if (need) {
-                ActivityCompat.requestPermissions(this, perms, PERMISSION_REQUEST_CODE);
-                return;
-            }
+            if (need) { ActivityCompat.requestPermissions(this, perms, PERM_CODE); return; }
         }
         initBluetooth();
     }
 
     @Override
-    public void onRequestPermissionsResult(int code, @NonNull String[] perms,
-                                           @NonNull int[] results) {
-        super.onRequestPermissionsResult(code, perms, results);
-        if (code == PERMISSION_REQUEST_CODE) {
+    public void onRequestPermissionsResult(int code, @NonNull String[] perms, @NonNull int[] res) {
+        super.onRequestPermissionsResult(code, perms, res);
+        if (code == PERM_CODE) {
             boolean ok = true;
-            for (int r : results) if (r != PackageManager.PERMISSION_GRANTED) { ok = false; break; }
+            for (int r : res) if (r != PackageManager.PERMISSION_GRANTED) ok = false;
             if (ok) initBluetooth();
-            else { tvStatus.setText("Cần cấp quyền Bluetooth"); tvStatus.setTextColor(Color.RED); }
+            else { tvStatus.setText("Cần cấp quyền Bluetooth!"); tvStatus.setTextColor(Color.RED); }
         }
     }
 
     private void initBluetooth() {
-        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        if (bluetoothAdapter == null) {
-            tvStatus.setText("Thiết bị không hỗ trợ Bluetooth");
-            tvStatus.setTextColor(Color.RED);
-            return;
-        }
-        if (!bluetoothAdapter.isEnabled()) {
-            tvStatus.setText("Vui lòng bật Bluetooth");
-            tvStatus.setTextColor(Color.parseColor("#FF6600"));
-            return;
-        }
+        btAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (btAdapter == null) { tvStatus.setText("Không hỗ trợ Bluetooth"); return; }
+        if (!btAdapter.isEnabled()) { tvStatus.setText("Hãy bật Bluetooth"); return; }
 
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(ACTION_CODEC_CONFIG_CHANGED);
-        filter.addAction(ACTION_CONNECTION_STATE_CHANGED);
-        registerReceiver(codecReceiver, filter);
-
-        bluetoothAdapter.getProfileProxy(this, profileListener, BluetoothProfile.A2DP);
+        IntentFilter f = new IntentFilter();
+        f.addAction(ACTION_CODEC_CHANGED);
+        f.addAction(ACTION_CONN_CHANGED);
+        registerReceiver(receiver, f);
+        btAdapter.getProfileProxy(this, profileListener, BluetoothProfile.A2DP);
         addLog("Bluetooth init OK");
-        handler.postDelayed(periodicRefresh, REFRESH_INTERVAL_MS);
+        handler.postDelayed(periodicRefresh, REFRESH_MS);
     }
 
     private void refreshCodecInfo() {
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
-            tvStatus.setText("Bluetooth chưa bật");
-            tvStatus.setTextColor(Color.parseColor("#FF6600"));
+        if (btAdapter == null || !btAdapter.isEnabled()) {
+            showStatus("Bluetooth chưa bật", Color.parseColor("#FF6600"));
             return;
         }
-        if (bluetoothA2dp == null) {
-            tvStatus.setText("Đang kết nối A2DP profile...");
-            tvStatus.setTextColor(Color.GRAY);
+        if (btA2dp == null) {
+            showStatus("Đang kết nối A2DP...", Color.GRAY);
             return;
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
                         != PackageManager.PERMISSION_GRANTED) {
-            tvStatus.setText("Thiếu quyền BLUETOOTH_CONNECT");
+            showStatus("Thiếu quyền BLUETOOTH_CONNECT", Color.RED);
             return;
         }
 
-        List<BluetoothDevice> devices = bluetoothA2dp.getConnectedDevices();
+        List<BluetoothDevice> devices = btA2dp.getConnectedDevices();
         if (devices.isEmpty()) {
-            tvStatus.setText("Không có thiết bị A2DP nào kết nối");
-            tvStatus.setTextColor(Color.parseColor("#FF6600"));
-            tvDeviceName.setText("—"); tvCodec.setText("—"); tvBitrate.setText("—");
-            tvSampleRate.setText("—"); tvBitDepth.setText("—");
-            tvChannelMode.setText("—"); tvQualityMode.setText("—");
-            tvVerdict.setText("Kết nối tai nghe LDAC và mở nhạc để đo");
+            showStatus("Chưa kết nối tai nghe A2DP", Color.parseColor("#FF6600"));
+            resetFields();
+            tvVerdict.setText("Kết nối tai nghe LDAC rồi mở nhạc để đo");
             tvVerdict.setTextColor(Color.GRAY);
-            progressBitrate.setProgress(0);
-            addLog("No A2DP devices");
+            addLog("No A2DP device");
             return;
         }
 
         BluetoothDevice device = devices.get(0);
+        showStatus("Đã kết nối", Color.parseColor("#00C853"));
         String name = device.getName();
-        tvDeviceName.setText(name != null ? name : device.getAddress());
-        tvStatus.setText("Đã kết nối");
-        tvStatus.setTextColor(Color.parseColor("#00C853"));
+        tvDevice.setText(name != null ? name : device.getAddress());
 
-        // getCodecStatus is @hide — access via reflection
-        BluetoothCodecStatus codecStatus = getCodecStatusReflection(device);
-        if (codecStatus == null) {
-            tvCodec.setText("Không đọc được codec (hidden API bị chặn)");
-            addLog("getCodecStatus returned null");
+        // Check if audio is actually streaming — codec only active when playing
+        boolean playing = isA2dpPlaying(device);
+        addLog("A2DP playing: " + playing);
+
+        if (!playing) {
+            tvCodec.setText("Chờ phát nhạc...");
+            tvBitrate.setText("—");
+            tvMode.setText("—");
+            tvVerdict.setText("Tai nghe đã kết nối!\n\nHãy mở app nhạc và phát nhạc,\nrồi quay lại đây xem kết quả.\n(App tự cập nhật mỗi 2 giây)");
+            tvVerdict.setTextColor(Color.parseColor("#2979FF"));
+            progressBitrate.setProgress(0);
             return;
         }
 
-        BluetoothCodecConfig config = codecStatus.getCodecConfig();
-        if (config == null) {
-            tvCodec.setText("Không đọc được codec config");
-            addLog("getCodecConfig returned null");
+        // Music is playing — get codec status via reflection
+        BluetoothCodecStatus status = getCodecStatusViaReflection(device);
+        if (status == null) {
+            tvCodec.setText("Không đọc được codec");
+            tvVerdict.setText("Không lấy được thông tin codec.\n\nHave you tried:\n• Tắt/bật Bluetooth\n• Mở Developer Options → Bluetooth codec → chọn LDAC\n• Thử thiết bị khác");
+            tvVerdict.setTextColor(Color.parseColor("#FF6600"));
+            addLog("getCodecStatus = null (music playing but API blocked or unsupported)");
             return;
         }
 
-        displayCodecInfo(config);
+        BluetoothCodecConfig cfg = status.getCodecConfig();
+        if (cfg == null) {
+            tvCodec.setText("Codec config null");
+            addLog("getCodecConfig = null");
+            return;
+        }
+
+        displayCodecInfo(cfg);
     }
 
-    private BluetoothCodecStatus getCodecStatusReflection(BluetoothDevice device) {
+    private boolean isA2dpPlaying(BluetoothDevice device) {
+        try {
+            return btA2dp.isA2dpPlaying(device);
+        } catch (Exception e) {
+            addLog("isA2dpPlaying error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private BluetoothCodecStatus getCodecStatusViaReflection(BluetoothDevice device) {
         try {
             Method m = BluetoothA2dp.class.getDeclaredMethod("getCodecStatus", BluetoothDevice.class);
             m.setAccessible(true);
-            return (BluetoothCodecStatus) m.invoke(bluetoothA2dp, device);
+            Object result = m.invoke(btA2dp, device);
+            addLog("getCodecStatus via reflection: " + (result != null ? "OK" : "null"));
+            return (BluetoothCodecStatus) result;
         } catch (Exception e) {
             addLog("Reflection error: " + e.getClass().getSimpleName() + ": " + e.getMessage());
             return null;
         }
     }
 
-    private void displayCodecInfo(BluetoothCodecConfig config) {
-        int codecType    = config.getCodecType();
-        int sampleRate   = config.getSampleRate();
-        int bitsPerSample = config.getBitsPerSample();
-        int channelMode  = config.getChannelMode();
-        long specific1   = config.getCodecSpecific1();
+    private void displayCodecInfo(BluetoothCodecConfig cfg) {
+        int type    = cfg.getCodecType();
+        int sr      = cfg.getSampleRate();
+        int bits    = cfg.getBitsPerSample();
+        int ch      = cfg.getChannelMode();
+        long s1     = cfg.getCodecSpecific1();
 
-        tvCodec.setText(getCodecName(codecType));
-        tvSampleRate.setText(getSampleRateString(sampleRate));
-        tvBitDepth.setText(getBitDepthString(bitsPerSample));
-        tvChannelMode.setText(getChannelModeString(channelMode));
+        tvCodec.setText(codecName(type));
+        tvSampleRate.setText(srStr(sr));
+        tvBitDepth.setText(bitsStr(bits));
+        tvChannel.setText(chStr(ch));
+        addLog(String.format("Codec=%s SR=%s Bits=%s s1=%d", codecName(type), srStr(sr), bitsStr(bits), s1));
 
-        addLog(String.format("Codec=%s SR=%s Bits=%s S1=%d",
-                getCodecName(codecType), getSampleRateString(sampleRate),
-                getBitDepthString(bitsPerSample), specific1));
-
-        if (codecType == BluetoothCodecConfig.SOURCE_CODEC_TYPE_LDAC) {
-            displayLdacInfo(specific1);
+        if (type == BluetoothCodecConfig.SOURCE_CODEC_TYPE_LDAC) {
+            showLdac(s1);
         } else {
-            int kbps = estimateNonLdacBitrate(codecType);
+            int kbps = estimateKbps(type);
             tvBitrate.setText(kbps > 0 ? kbps + " kbps (ước tính)" : "N/A");
-            tvQualityMode.setText("N/A — không phải LDAC");
-            tvVerdict.setText("Tai nghe đang dùng " + getCodecName(codecType) +
-                    ", không phải LDAC.\nVào Settings → Bluetooth để bật LDAC.");
+            tvMode.setText("N/A — không phải LDAC");
+            tvVerdict.setText("Đang dùng " + codecName(type) + ", chưa phải LDAC.\n\nVào Settings → Developer options → Bluetooth audio codec → chọn LDAC.");
             tvVerdict.setTextColor(Color.parseColor("#FF6600"));
             progressBitrate.setProgress(kbps > 0 ? (int)(kbps / 9.9f) : 0);
         }
     }
 
-    private void displayLdacInfo(long specific1) {
-        // specific1 for LDAC: 1000=High(990kbps), 1001=Mid(660kbps),
-        //                     1002=Low(330kbps), 1003=Adaptive
-        // Some OEMs use 0/1/2/3 instead
-        String qualityMode;
-        int bitrate;
-        int color;
-        String verdict;
+    private void showLdac(long s1) {
+        String mode; int kbps; int color; String verdict;
 
-        if (specific1 == 1000 || specific1 == 0) {
-            qualityMode = "High Quality";
-            bitrate     = 990;
-            color       = Color.parseColor("#00C853");
-            verdict     = "CHÍNH XÁC! LDAC đang chạy ở tốc độ cao nhất 990 kbps.\nChất lượng âm thanh tối đa được đảm bảo!";
-        } else if (specific1 == 1001 || specific1 == 1) {
-            qualityMode = "Mid Quality";
-            bitrate     = 660;
-            color       = Color.parseColor("#FFD600");
-            verdict     = "LDAC đang ở mức trung bình 660 kbps.\nVào Settings → Developer options → Bluetooth audio codec\n→ LDAC quality → chọn \"Optimize for audio quality\".";
-        } else if (specific1 == 1002 || specific1 == 2) {
-            qualityMode = "Low Quality / Connection Priority";
-            bitrate     = 330;
-            color       = Color.parseColor("#FF1744");
-            verdict     = "LDAC đang ở mức thấp 330 kbps (ưu tiên kết nối).\nChất lượng thậm chí thấp hơn SBC!\nĐổi LDAC Quality sang \"Optimize for audio quality\".";
-        } else if (specific1 == 1003 || specific1 == 3) {
-            qualityMode = "Adaptive (330–990 kbps)";
-            bitrate     = -1;
-            color       = Color.parseColor("#2979FF");
-            verdict     = "LDAC đang ở chế độ Adaptive — tự điều chỉnh theo chất lượng kết nối.\nĐể đảm bảo 990 kbps, chọn \"Optimize for audio quality\".";
+        if (s1 == 1000 || s1 == 0) {
+            mode    = "High Quality";
+            kbps    = 990;
+            color   = Color.parseColor("#00C853");
+            verdict = "CHÍNH XÁC! LDAC đang chạy tốc độ tối đa 990 kbps.\nChất lượng âm thanh được đảm bảo hoàn toàn!";
+        } else if (s1 == 1001 || s1 == 1) {
+            mode    = "Mid Quality";
+            kbps    = 660;
+            color   = Color.parseColor("#FFD600");
+            verdict = "LDAC đang ở 660 kbps (mức trung bình).\n\nĐể đạt 990 kbps:\nSettings → Developer options → LDAC quality → \"Optimize for audio quality\"";
+        } else if (s1 == 1002 || s1 == 2) {
+            mode    = "Low / Connection Priority";
+            kbps    = 330;
+            color   = Color.parseColor("#FF1744");
+            verdict = "LDAC chỉ 330 kbps — ưu tiên kết nối ổn định.\nChất lượng còn thấp hơn SBC!\n\nĐổi sang \"Optimize for audio quality\" trong Developer options.";
+        } else if (s1 == 1003 || s1 == 3) {
+            mode    = "Adaptive (330–990 kbps)";
+            kbps    = -1;
+            color   = Color.parseColor("#2979FF");
+            verdict = "LDAC Adaptive — tự điều chỉnh bitrate theo chất lượng kết nối.\nĐể cố định 990 kbps, chọn \"Optimize for audio quality\".";
         } else {
-            qualityMode = "Unknown (raw=" + specific1 + ")";
-            bitrate     = -1;
-            color       = Color.GRAY;
-            verdict     = "Không xác định được chế độ LDAC. specific1=" + specific1;
+            mode    = "Unknown (s1=" + s1 + ")";
+            kbps    = -1;
+            color   = Color.GRAY;
+            verdict = "Không xác định được chế độ LDAC. specific1=" + s1;
         }
 
-        tvQualityMode.setText(qualityMode);
-        if (bitrate > 0) {
-            tvBitrate.setText(bitrate + " kbps");
-            progressBitrate.setProgress((int)(bitrate / 9.9f));
-        } else {
-            tvBitrate.setText("330–990 kbps (Adaptive)");
-            progressBitrate.setProgress(66);
-        }
+        tvMode.setText(mode);
+        if (kbps > 0) { tvBitrate.setText(kbps + " kbps"); progressBitrate.setProgress((int)(kbps / 9.9f)); }
+        else           { tvBitrate.setText("330–990 kbps"); progressBitrate.setProgress(66); }
         tvVerdict.setText(verdict);
         tvVerdict.setTextColor(color);
     }
 
-    private int estimateNonLdacBitrate(int codecType) {
-        switch (codecType) {
+    private void showStatus(String msg, int color) {
+        tvStatus.setText(msg);
+        tvStatus.setTextColor(color);
+    }
+
+    private void resetFields() {
+        tvDevice.setText("—"); tvCodec.setText("—"); tvBitrate.setText("—");
+        tvMode.setText("—"); tvSampleRate.setText("—"); tvBitDepth.setText("—"); tvChannel.setText("—");
+        progressBitrate.setProgress(0);
+    }
+
+    private int estimateKbps(int t) {
+        switch (t) {
             case BluetoothCodecConfig.SOURCE_CODEC_TYPE_SBC:     return 328;
             case BluetoothCodecConfig.SOURCE_CODEC_TYPE_AAC:     return 320;
             case BluetoothCodecConfig.SOURCE_CODEC_TYPE_APTX:    return 352;
@@ -354,7 +348,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private String getCodecName(int t) {
+    private String codecName(int t) {
         switch (t) {
             case BluetoothCodecConfig.SOURCE_CODEC_TYPE_SBC:     return "SBC";
             case BluetoothCodecConfig.SOURCE_CODEC_TYPE_AAC:     return "AAC";
@@ -365,7 +359,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private String getSampleRateString(int sr) {
+    private String srStr(int sr) {
         switch (sr) {
             case BluetoothCodecConfig.SAMPLE_RATE_44100:  return "44.1 kHz";
             case BluetoothCodecConfig.SAMPLE_RATE_48000:  return "48 kHz";
@@ -377,7 +371,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private String getBitDepthString(int b) {
+    private String bitsStr(int b) {
         switch (b) {
             case BluetoothCodecConfig.BITS_PER_SAMPLE_16: return "16-bit";
             case BluetoothCodecConfig.BITS_PER_SAMPLE_24: return "24-bit";
@@ -386,15 +380,15 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private String getChannelModeString(int ch) {
-        switch (ch) {
+    private String chStr(int c) {
+        switch (c) {
             case BluetoothCodecConfig.CHANNEL_MODE_MONO:   return "Mono";
             case BluetoothCodecConfig.CHANNEL_MODE_STEREO: return "Stereo";
-            default: return "Unknown(" + ch + ")";
+            default: return "Unknown(" + c + ")";
         }
     }
 
-    private String stateToString(int s) {
+    private String stateStr(int s) {
         switch (s) {
             case BluetoothProfile.STATE_CONNECTED:     return "CONNECTED";
             case BluetoothProfile.STATE_CONNECTING:    return "CONNECTING";
@@ -406,17 +400,17 @@ public class MainActivity extends AppCompatActivity {
 
     private void addLog(String msg) {
         String ts = android.text.format.DateFormat.format("HH:mm:ss", new java.util.Date()).toString();
-        logBuilder.insert(0, "[" + ts + "] " + msg + "\n");
-        if (logBuilder.length() > 3000) logBuilder.setLength(3000);
-        runOnUiThread(() -> tvLog.setText(logBuilder.toString()));
+        logBuf.insert(0, "[" + ts + "] " + msg + "\n");
+        if (logBuf.length() > 4000) logBuf.setLength(4000);
+        runOnUiThread(() -> tvLog.setText(logBuf.toString()));
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         handler.removeCallbacks(periodicRefresh);
-        try { unregisterReceiver(codecReceiver); } catch (Exception ignored) {}
-        if (bluetoothAdapter != null && bluetoothA2dp != null)
-            bluetoothAdapter.closeProfileProxy(BluetoothProfile.A2DP, bluetoothA2dp);
+        try { unregisterReceiver(receiver); } catch (Exception ignored) {}
+        if (btAdapter != null && btA2dp != null)
+            btAdapter.closeProfileProxy(BluetoothProfile.A2DP, btA2dp);
     }
 }
